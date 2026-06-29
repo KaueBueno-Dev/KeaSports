@@ -35,11 +35,24 @@ PONTOS_CATEGORIA = [10, 8, 6, 4, 2, 1, 1, 1, 1, 1]
 
 def index(request):
     corridas = Corrida.objects.all().order_by("-data")[:3]
-    resultados_recentes = (
+    arquivos_recentes = (
         ArquivoExcel.objects
+        .select_related("corrida", "percurso__corrida")
         .all()
-        .order_by("-criado_em")[:9]
+        .order_by("-criado_em")
     )
+    resultados_recentes = []
+    corridas_vistas = set()
+    for arquivo in arquivos_recentes:
+        corrida = arquivo.corrida or (arquivo.percurso.corrida if arquivo.percurso_id else None)
+        if not corrida or corrida.id in corridas_vistas:
+            continue
+        arquivo.corrida_resultado_publico = corrida
+        resultados_recentes.append(arquivo)
+        corridas_vistas.add(corrida.id)
+        if len(resultados_recentes) == 9:
+            break
+
     return render(
         request,
         "eventos/index.html",
@@ -316,6 +329,7 @@ def buscar_usuario_cpf(request):
                 "data_nascimento": participante.data_nascimento.strftime("%Y-%m-%d")
                 if participante.data_nascimento
                 else "",
+                "cidade": participante.cidade or "",
                 "equipe": participante.equipe or "",
                 "sexo": participante.sexo or "",
                 "tamanho_camisa": participante.tamanho_camisa or "M",
@@ -332,9 +346,34 @@ def buscar_usuario_cpf(request):
 @login_required
 def inscrever_corrida(request, corrida_id):
     corrida = get_object_or_404(Corrida, id=corrida_id)
+    percursos = list(
+        corrida.percursos
+        .filter(ativo=True)
+        .order_by("ordem", "distancia_km", "nome")
+    )
+    percurso_error = None
 
     if request.method == "POST":
         cpf = re.sub(r"\D", "", request.POST.get("cpf", "").strip())
+        percurso = None
+
+        if len(percursos) == 1:
+            percurso = percursos[0]
+        elif len(percursos) > 1:
+            percurso_id = request.POST.get("percurso")
+            if not percurso_id:
+                percurso_error = "Escolha o percurso/distancia da sua inscricao."
+            else:
+                try:
+                    percurso = next(
+                        item
+                        for item in percursos
+                        if str(item.id) == str(percurso_id)
+                    )
+                except StopIteration:
+                    percurso_error = "Percurso invalido para esta corrida."
+        else:
+            percurso_error = "Esta corrida ainda nao possui percurso ativo para inscricao."
 
         if not cpf:
             cpf = request.user.username
@@ -357,7 +396,7 @@ def inscrever_corrida(request, corrida_id):
         except Participante.DoesNotExist:
             form = ParticipanteForm(request.POST)
 
-        if form.is_valid():
+        if form.is_valid() and not percurso_error:
             with transaction.atomic():
                 participante = form.save(commit=False)
                 participante.cpf = cpf
@@ -367,7 +406,11 @@ def inscrever_corrida(request, corrida_id):
                 inscricao, criada = Inscricao.objects.get_or_create(
                     participante=participante,
                     corrida=corrida,
+                    defaults={"percurso": percurso},
                 )
+                if not criada and not inscricao.percurso_id:
+                    inscricao.percurso = percurso
+                    inscricao.save(update_fields=["percurso", "atualizada_em"])
             return render(
                 request,
                 "eventos/corrida/inscricao_sucesso.html",
@@ -375,6 +418,7 @@ def inscrever_corrida(request, corrida_id):
                     "corrida": corrida,
                     "participante": participante,
                     "inscricao": inscricao,
+                    "percurso": inscricao.percurso,
                     "inscricao_criada": criada,
                 },
             )
@@ -387,6 +431,8 @@ def inscrever_corrida(request, corrida_id):
         {
             "form": form,
             "corrida": corrida,
+            "percursos": percursos,
+            "percurso_error": percurso_error,
             "buscar_url": "buscar_usuario_cpf",
         },
     )

@@ -187,6 +187,29 @@
         <p id="tamanho-error" class="hidden text-red-500 text-xs mt-1.5"></p>
       </div>
 
+      <!-- Cidade -->
+      <div class="space-y-2">
+        <label for="cidade" class="block text-sm font-medium text-gray-600">
+          Cidade
+        </label>
+        <div class="relative group">
+          <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-300 group-focus-within:text-red-400 transition-colors duration-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </div>
+          <input
+            type="text"
+            id="cidade"
+            name="cidade"
+            maxlength="100"
+            placeholder="Sua cidade"
+            class="block w-full pl-11 pr-4 py-3 rounded-xl border border-gray-200 bg-gray-50/50 text-gray-900 placeholder-gray-400 shadow-sm hover:border-gray-300 focus:bg-white focus:border-red-500 focus:ring-4 focus:ring-red-500/10 sm:text-sm transition-all duration-200 ease-in-out"
+          />
+        </div>
+      </div>
+
       <!-- Equipe (Opcional) -->
       <div class="space-y-2">
         <label for="equipe" class="block text-sm font-medium text-gray-600">

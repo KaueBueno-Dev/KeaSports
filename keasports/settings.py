@@ -291,6 +291,8 @@ if MEDIA_STORAGE == "s3":
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+CRONOMETRAGEM_API_KEY = os.getenv("CRONOMETRAGEM_API_KEY", "").strip()
+
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [

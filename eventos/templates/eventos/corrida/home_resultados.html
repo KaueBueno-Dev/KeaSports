@@ -53,6 +53,12 @@
         </h3>
 
         <div class="space-y-2 text-base text-gray-600 mb-4">
+          {% if arquivo.percurso %}
+          <p><span class="font-semibold text-gray-700">Corrida:</span> {{ arquivo.corrida_resultado_publico.nome }}</p>
+          {% elif arquivo.corrida %}
+          <p><span class="font-semibold text-gray-700">Corrida:</span> {{ arquivo.corrida.nome }}</p>
+          {% endif %}
+
           {% if arquivo.data_corrida %}
           <p><span class="font-semibold text-gray-700">Data:</span> {{ arquivo.data_corrida }}</p>
           {% endif %}
@@ -64,7 +70,7 @@
         </div>
 
         <a
-          href="{% url 'arquivo_detail' arquivo.pk %}"
+          href="{% url 'corrida_resultados' arquivo.corrida_resultado_publico.id %}"
           class="block w-full text-center bg-[#E30000] text-white py-2 rounded-lg hover:bg-red-700 transition font-semibold"
         >
           Ver resultados

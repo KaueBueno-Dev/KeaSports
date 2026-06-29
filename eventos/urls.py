@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from . import api_views
 
 
 urlpatterns = [
@@ -14,6 +15,8 @@ urlpatterns = [
     # Rotas de participantes
     path('classificacao/', views.classificacao_view, name='classificacao'),
 
+    path('corridas/<int:corrida_id>/resultados/', views.corrida_resultados, name='corrida_resultados'),
+    path('corridas/<int:corrida_id>/resultados/<int:percurso_id>/', views.resultado_percurso_detail, name='resultado_percurso_detail'),
     path('arquivo/<int:pk>/', views.arquivo_detail, name='arquivo_detail'),
     path('arquivo_list/', views.ArquivoExcelListView, name='arquivo_list'),
 
@@ -28,5 +31,12 @@ urlpatterns = [
 
     path('historico_usuario/', views.historico_usuario, name='historico_usuario'),
     path('eventos/buscar-nomes/', views.buscar_nomes_autocomplete, name='buscar_nomes_autocomplete'),
+
+    # API privada de cronometragem
+    path('api/cronometragem/eventos/', api_views.EventosCronometragemView.as_view(), name='api_cronometragem_eventos'),
+    path('api/cronometragem/eventos/<int:evento_id>/percursos/', api_views.PercursosCronometragemView.as_view(), name='api_cronometragem_percursos'),
+    path('api/cronometragem/inscricoes-pagas/', api_views.InscricoesPagasCronometragemView.as_view(), name='api_cronometragem_inscricoes_pagas'),
+    path('api/cronometragem/inscricoes/<int:inscricao_id>/chip/', api_views.AtualizarChipInscricaoView.as_view(), name='api_cronometragem_inscricao_chip'),
+    path('api/cronometragem/resultados/', api_views.EnviarResultadoCronometragemView.as_view(), name='api_cronometragem_resultados'),
 
 ]                                                                               

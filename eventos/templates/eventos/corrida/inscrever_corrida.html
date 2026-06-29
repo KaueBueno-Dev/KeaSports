@@ -73,6 +73,16 @@
     </div>
 
     <div>
+      <label for="cidade" class="block font-medium mb-1">Cidade</label>
+      <input
+        type="text"
+        name="cidade"
+        id="cidade"
+        class="px-3 py-2 rounded w-full border border-gray-300 focus:border-blue-500 focus:ring focus:ring-blue-200"
+      />
+    </div>
+
+    <div>
       <label for="equipe" class="block font-medium mb-1">Equipe (opcional)</label>
       <input
         type="text"
@@ -107,6 +117,44 @@
         <option value="M" selected>M</option>
         <option value="G">G</option>
       </select>
+    </div>
+
+    <div>
+      <label for="percurso" class="block font-medium mb-1">Percurso / Distancia</label>
+
+      {% if percurso_error %}
+        <div class="bg-red-50 text-red-700 p-3 rounded mb-3 font-medium">
+          {{ percurso_error }}
+        </div>
+      {% endif %}
+
+      {% if percursos|length == 1 %}
+        {% with percurso_unico=percursos.0 %}
+          <input type="hidden" name="percurso" value="{{ percurso_unico.id }}">
+          <div class="px-3 py-2 rounded w-full border border-gray-300 bg-gray-50 text-gray-700">
+            {{ percurso_unico.nome }}
+          </div>
+        {% endwith %}
+      {% elif percursos|length > 1 %}
+        <div class="bg-yellow-50 text-yellow-800 p-3 rounded mb-3 font-medium">
+          Atenção: escolha corretamente o percurso em que você vai participar.
+        </div>
+        <select
+          name="percurso"
+          id="percurso"
+          required
+          class="px-3 py-2 rounded w-full border border-gray-300 focus:border-blue-500 focus:ring focus:ring-blue-200"
+        >
+          <option value="">Selecione o percurso</option>
+          {% for percurso in percursos %}
+            <option value="{{ percurso.id }}">{{ percurso.nome }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <div class="bg-red-50 text-red-700 p-3 rounded font-medium">
+          Esta corrida ainda não possui percurso ativo para inscrição.
+        </div>
+      {% endif %}
     </div>
 
     <div style="margin-top: 20px;">
@@ -217,6 +265,7 @@ document.addEventListener('DOMContentLoaded', function () {
           // Preencher formulário
           document.getElementById('nome').value = data.nome || '';
           document.getElementById('data_nascimento').value = data.data_nascimento || '';
+          document.getElementById('cidade').value = data.cidade || '';
           document.getElementById('equipe').value = data.equipe || '';
           
           // Para selects, precisamos selecionar a option correta

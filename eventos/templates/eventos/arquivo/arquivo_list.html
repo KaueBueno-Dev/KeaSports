@@ -103,6 +103,15 @@
             <h2 class="text-xl font-black leading-tight text-[#0F172A]">{{ arquivo.nome }}</h2>
 
             <div class="mt-5 flex-1 space-y-3">
+              {% if arquivo.corrida_resultado_publico %}
+              <p class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                <svg class="h-5 w-5 shrink-0 text-[#DC2626]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 19h16M6 17l4-10 4 10M14 13h4l2 4" />
+                </svg>
+                {{ arquivo.corrida_resultado_publico.nome }}
+              </p>
+              {% endif %}
+
               <p class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                 <svg class="h-5 w-5 shrink-0 text-[#DC2626]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 21s7.5-4.5 7.5-11a7.5 7.5 0 1 0-15 0c0 6.5 7.5 11 7.5 11Z" />
@@ -121,7 +130,7 @@
             </div>
 
             <a
-              href="{% url 'arquivo_detail' arquivo.pk %}"
+              href="{% url 'corrida_resultados' arquivo.corrida_resultado_publico.id %}"
               class="mt-6 block w-full rounded-xl bg-blue-600 px-5 py-3 text-center text-sm font-black text-white shadow-md shadow-blue-500/20 transition hover:-translate-y-0.5 hover:bg-blue-700"
             >
               Ver resultados
@@ -157,18 +166,18 @@
       </nav>
       {% endif %}
     {% else %}
-      <div class="mx-auto max-w-2xl rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
-        <div class="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-[#DC2626]">
-          <svg class="h-7 w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35" />
-            <circle cx="11" cy="11" r="7" />
+      <div class="mx-auto flex w-full max-w-xl flex-col items-center rounded-2xl border border-slate-200 bg-white px-6 py-10 text-center shadow-[0_18px_50px_rgba(15,23,42,0.08)] sm:px-10 sm:py-12">
+        <div class="flex h-16 w-16 items-center justify-center rounded-2xl bg-red-50 text-[#DC2626] shadow-sm">
+          <svg class="h-8 w-8 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6.5 3.5h11A1.5 1.5 0 0 1 19 5v14a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5Z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 8h8M8 12h8M8 16h5" />
           </svg>
         </div>
-        <h2 class="mt-5 text-2xl font-black text-[#0F172A]">Nenhum resultado encontrado.</h2>
+        <h2 class="mt-6 text-2xl font-black leading-tight text-[#0F172A]">Nenhum resultado encontrado.</h2>
         {% if query %}
-          <p class="mt-3 text-sm font-semibold text-slate-500">Não encontramos resultados para "{{ query }}".</p>
+          <p class="mt-3 max-w-md text-sm font-semibold leading-relaxed text-slate-500">Não encontramos resultados para "{{ query }}".</p>
         {% else %}
-          <p class="mt-3 text-sm font-semibold text-slate-500">Assim que os arquivos forem enviados, eles aparecerão aqui.</p>
+          <p class="mt-3 max-w-md text-sm font-semibold leading-relaxed text-slate-500">Assim que os resultados forem publicados, eles aparecerão aqui.</p>
         {% endif %}
       </div>
     {% endif %}

@@ -83,6 +83,7 @@ def register_view(request):
 
         sexo = request.POST.get("sexo", "").strip()
         tamanho_camisa = request.POST.get("tamanho_camisa", "M").strip()
+        cidade = request.POST.get("cidade", "").strip() or None
         equipe = request.POST.get("equipe", "").strip() or None
 
         if not nome or not cpf or not password or not data:
@@ -119,6 +120,7 @@ def register_view(request):
                         data_nascimento=data_nascimento,
                         sexo=sexo,
                         tamanho_camisa=tamanho_camisa,
+                        cidade=cidade,
                         equipe=equipe
                     )
 

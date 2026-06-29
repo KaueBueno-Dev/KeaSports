@@ -3,40 +3,50 @@
 {% block content %}
 
 <div class="w-full py-6">
-  <h1 class="text-4xl font-bold text-center mt-10">{{ arquivo.nome }}</h1>
+  <h1 class="mt-10 text-center text-4xl font-bold">{{ arquivo.nome|default:corrida.nome }}</h1>
 
-  <p class="text-base text-gray-400 italic mt-1 mb-16 text-center">
-    Classificação Kea Sports
+  <p class="mb-16 mt-1 text-center text-base italic text-gray-400">
+    {% if corrida %}
+      {{ corrida.nome }}
+      {% if distancia_selecionada and mostrar_filtro_distancia %}
+        - {{ distancia_selecionada }}
+      {% endif %}
+    {% else %}
+      Classificacao Kea Sports
+    {% endif %}
   </p>
 
   {% if page.object_list %}
-
   <div class="mb-6">
     <form method="get" class="flex flex-col gap-2 sm:flex-row sm:items-end">
+      {% if mostrar_filtro_distancia %}
+      <div class="w-full sm:w-56">
+        <label for="distancia-select" class="mb-1 block text-sm text-gray-600">Distancia</label>
+        <select
+          name="distancia"
+          id="distancia-select"
+          class="w-full rounded-lg border-2 border-gray-300 bg-white px-4 py-2 focus:outline-none focus:ring-0"
+          required
+        >
+          {% for item in distancias %}
+          <option value="{{ item }}" {% if item == distancia_selecionada %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endif %}
 
-      <!-- Filtro por nome -->
-      <div class="w-full">
-        <label class="block text-sm text-gray-600 mb-1">Nome</label>
-        {{ filter.form.nome|add_class:"w-full rounded-lg border-2 border-gray-300 px-4 py-2 focus:outline-none focus:ring-0" }}
+      <div class="w-full sm:w-56">
+        <label class="mb-1 block text-sm text-gray-600">Sexo</label>
+        {{ filter.form.sexo|add_class:"w-full rounded-lg border-2 border-gray-300 bg-white px-4 py-2 focus:outline-none focus:ring-0" }}
       </div>
 
-      <!-- Filtro categoria  -->
-      <div class="w-full sm:w-56 relative">
-        <label class="block text-sm text-gray-600 mb-1">Categoria</label>
+      <div class="relative w-full sm:w-56">
+        <label class="mb-1 block text-sm text-gray-600">Categoria</label>
+        <input type="hidden" name="categoria" id="categoria-input" value="{{ request.GET.categoria|default:'' }}">
 
-        <!-- id serve para que o JS localize o elemento, e a partir disso possa enviar uma resposta para o prórpio (também são possíveis outras ações, mas no meu caso apenas essa esta sendo realizada). -->
-
-        <input type="hidden" name="categoria" id="categoria-input" 
-               value="{{ request.GET.categoria|default:'' }}">
-        
-        <!-- Como está se tratando de um input com dropdown e não um input comum, não é aqui neste input que as opções de click são exibidas, mas sim dentro do dropdown, aqui o resultado do click do dropdown é recebido e enviado para a url. -->
-       
-        <!-- Dropdown - Exibição das categorias na tela (Apenas a escolhida pelo user, ja filtrada ou Todas) -->
         <button type="button"
-                id="dropdown-btn" 
-                class="w-full bg-white border-2 border-gray-300 rounded-lg px-4 py-2
-                       flex justify-between items-center hover:bg-gray-100 transition">
-
+                id="dropdown-btn"
+                class="flex w-full items-center justify-between rounded-lg border-2 border-gray-300 bg-white px-4 py-2 transition hover:bg-gray-100">
           <span id="dropdown-text">
             {% if request.GET.categoria %}
               {{ request.GET.categoria }}
@@ -45,56 +55,56 @@
             {% endif %}
           </span>
 
-          <svg id="arrow" class="w-4 h-4 transition-transform" fill="none"
-               stroke="currentColor" viewBox="0 0 24 24">
+          <svg id="arrow" class="h-4 w-4 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-width="2" d="M19 9l-7 7-7-7"/>
           </svg>
         </button>
 
-        <!-- Lista -->
         <ul id="dropdown-list"
-            class="hidden absolute w-full mt-1 bg-white border border-gray-300
-                   rounded-lg shadow-lg max-h-52 overflow-y-auto z-50">
-
-          <li class="px-4 py-2 md:px-5  hover:bg-gray-100 cursor-pointer"
-              data-value="">Todas</li>
-
+            class="absolute z-50 mt-1 hidden max-h-52 w-full overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-lg">
+          <li class="cursor-pointer px-4 py-2 hover:bg-gray-100" data-value="">Todas</li>
           {% for c in filter.filters.categoria.extra.choices %}
-          <li class="px-4 py-2 hover:bg-gray-100 cursor-pointer"
-              data-value="{{ c.0 }}">
-            {{ c.1 }}
-          </li>
+          <li class="cursor-pointer px-4 py-2 hover:bg-gray-100" data-value="{{ c.0 }}">{{ c.1 }}</li>
           {% endfor %}
         </ul>
       </div>
 
+      <div class="w-full">
+        <label class="mb-1 block text-sm text-gray-600">Nome</label>
+        {{ filter.form.nome|add_class:"w-full rounded-lg border-2 border-gray-300 px-4 py-2 focus:outline-none focus:ring-0" }}
+      </div>
+
       <button type="submit"
-        class="w-full sm:w-auto rounded-lg border-2 border-gray-300 bg-white px-6 py-2 text-gray-400 hover:bg-gray-200">
+        class="w-full rounded-lg border-2 border-gray-300 bg-white px-6 py-2 text-gray-500 hover:bg-gray-200 sm:w-auto">
         Filtrar
       </button>
-
     </form>
   </div>
 
-  <!-- TABELA -->
-  <div class="w-full overflow-x-auto shadow-md rounded-2xl mt-6">
-    <table class="w-full min-w-full text-sm text-center">
-      <thead class="bg-white text-black font-bold">
+  <div class="mt-6 w-full overflow-x-auto rounded-2xl shadow-md">
+    <table class="w-full min-w-full text-center text-sm">
+      <thead class="bg-white font-bold text-black">
         <tr>
-          <th class="p-3 text-md">Colocação</th>
+          <th class="p-3 text-md">Colocacao</th>
           <th class="p-3">Nome</th>
+          {% if mostrar_filtro_distancia %}
+          <th class="p-3">Distancia</th>
+          {% endif %}
           <th class="p-3">Categoria</th>
           <th class="p-3">Tempo</th>
-          <th class="p-3">Vel. Média</th>
+          <th class="p-3">Vel. Media</th>
         </tr>
       </thead>
 
       <tbody>
         {% for c in page.object_list %}
         <tr class="odd:bg-gray-100 even:bg-white hover:bg-gray-200">
-          <td class="p-3 font-semibold">{{ c.colocacao_exibicao}}º</td>
+          <td class="p-3 font-semibold">{{ c.colocacao_exibicao }}º</td>
           <td class="p-3 text-left">{{ c.nome }}</td>
-          <td class="p-3">{{ c.categoria }}</td>
+          {% if mostrar_filtro_distancia %}
+          <td class="p-3">{{ c.distancia }}</td>
+          {% endif %}
+          <td class="p-3">{{ c.categoria_exibicao }}</td>
           <td class="p-3">{{ c.tempo_formatado }}</td>
           <td class="p-3">{{ c.Vel_media }}</td>
         </tr>
@@ -102,16 +112,14 @@
       </tbody>
     </table>
   </div>
-
   {% else %}
-  <p class="text-gray-500 text-center mt-10">Nenhum corredor encontrado.</p>
+  <p class="mt-10 text-center text-gray-500">Nenhum corredor encontrado.</p>
   {% endif %}
 
-  <!-- Paginação -->
-  <div class="flex justify-center items-center gap-6 mt-6">
+  <div class="mt-6 flex items-center justify-center gap-6">
     {% if page.has_previous %}
     <a href="?{{ request.GET.urlencode }}&page={{ page.previous_page_number }}"
-       class="px-4 py-2 border rounded-lg text-lg">←</a>
+       class="rounded-lg border px-4 py-2 text-lg">&larr;</a>
     {% endif %}
 
     <span class="text-sm text-gray-600">
@@ -120,53 +128,44 @@
 
     {% if page.has_next %}
     <a href="?{{ request.GET.urlencode }}&page={{ page.next_page_number }}"
-       class="px-4 py-2 border rounded-lg text-lg">→</a>
+       class="rounded-lg border px-4 py-2 text-lg">&rarr;</a>
     {% endif %}
   </div>
-
 </div>
-
-
-<!-- JS DROPDOWN -->
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
-
-  const btn   = document.getElementById("dropdown-btn");
-  const list  = document.getElementById("dropdown-list");
+  const btn = document.getElementById("dropdown-btn");
+  const list = document.getElementById("dropdown-list");
   const input = document.getElementById("categoria-input");
-  const text  = document.getElementById("dropdown-text");
+  const text = document.getElementById("dropdown-text");
   const arrow = document.getElementById("arrow");
 
-  // Abrir / fechar
+  if (!btn || !list || !input || !text || !arrow) {
+    return;
+  }
+
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     list.classList.toggle("hidden");
     arrow.classList.toggle("rotate-180");
   });
 
-  // Selecionar
   list.querySelectorAll("li").forEach(item => {
     item.addEventListener("click", () => {
-      const value = item.dataset.value;
-      const label = item.textContent.trim();
-
-      input.value = value;
-      text.textContent = label;
-
+      input.value = item.dataset.value;
+      text.textContent = item.textContent.trim();
       list.classList.add("hidden");
       arrow.classList.remove("rotate-180");
     });
   });
 
-  // Fechar ao clicar fora
   document.addEventListener("click", (e) => {
     if (!btn.contains(e.target) && !list.contains(e.target)) {
       list.classList.add("hidden");
       arrow.classList.remove("rotate-180");
     }
   });
-
 });
 </script>
 
