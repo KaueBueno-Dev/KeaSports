@@ -1,4 +1,9 @@
---> Comando para atualizações: $env:DJANGO_SECRET_KEY='local-test-key'; $env:DJANGO_DEBUG='True';
+- python manage.py runserver
+- python manage.py migrate
+
+
+
+-> Comando para atualizações: $env:DJANGO_SECRET_KEY='local-test-key'; $env:DJANGO_DEBUG='True';
 
 
 --> $env:DJANGO_SECRET_KEY='local-test-key'; $env:DJANGO_DEBUG='True';  python manage.py runserver 127.0.0.1:8000

@@ -1,20 +1,22 @@
-from datetime import date, timedelta
+﻿from datetime import date, timedelta
 from io import BytesIO
+from unittest.mock import Mock, patch
 
 from django.contrib import admin
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
-from django.db.models.deletion import ProtectedError
 from django.db.models.signals import post_save
 from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
+from requests import exceptions as requests_exceptions
 
 from eventos.forms import ArquivoExcelAdminForm, InscricaoAdminForm
-from eventos.admin import ADMIN_MODEL_ORDER, ArquivoExcelAdmin, CorridaAdmin
+from eventos.admin import ADMIN_MODEL_ORDER, ArquivoExcelAdmin, CorridaAdmin, InscricaoAdmin
 from eventos.filters import CorredorFilter, categoria_sem_sexo
 from eventos.models import ArquivoExcel, Corredor, Corrida, Inscricao, Participante, PercursoCorrida, ResultadoInscricao
+from eventos.services.categorias import calcular_categoria_por_data_nascimento
 from eventos.signals import extrair_dados_excel, normalizar_distancia
 from eventos.views.corrida_views import calcular_rankinkg
 
@@ -115,7 +117,39 @@ class InscricaoCorridaTests(TestCase):
             nome="10 km",
             distancia_km=10,
         )
+        self._cpf_indice = 10000000000
         self.client.login(username=CPF_VALIDO, password="SenhaForte123!")
+
+    def payload_inscricao(self, **overrides):
+        payload = {
+            "cpf": CPF_VALIDO,
+            "nome": "Joao Corredor",
+            "data_nascimento": "1991-04-20",
+            "sexo": "M",
+            "tamanho_camisa": "G",
+            "cidade": "Sorocaba",
+            "equipe": "Equipe A",
+        }
+        payload.update(overrides)
+        return payload
+
+    def criar_inscricao_extra(self, corrida=None, percurso=None, pago=True):
+        self._cpf_indice += 1
+        participante = Participante.objects.create(
+            nome=f"Atleta {self._cpf_indice}",
+            cpf=str(self._cpf_indice),
+            data_nascimento=date(1990, 1, 1),
+            sexo="M",
+            tamanho_camisa="M",
+        )
+        corrida = corrida or self.corrida_1
+        percurso = percurso or self.percurso_5k
+        return Inscricao.objects.create(
+            participante=participante,
+            corrida=corrida,
+            percurso=percurso,
+            pago=pago,
+        )
 
     def test_inscricao_com_percurso_unico_seleciona_automaticamente(self):
         response = self.client.post(
@@ -150,6 +184,391 @@ class InscricaoCorridaTests(TestCase):
         )
         self.assertEqual(inscricao.percurso, self.percurso_5k)
         self.assertFalse(inscricao.pago)
+
+    def test_evento_sem_limite_permite_inscricao(self):
+        self.assertIsNone(self.corrida_1.limite_inscritos)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_evento_com_limite_maior_que_pagas_permite_inscricao(self):
+        self.corrida_1.limite_inscritos = 2
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        self.criar_inscricao_extra(pago=True)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.corrida_1.vagas_ocupadas, 1)
+        self.assertTrue(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_evento_com_limite_igual_a_pagas_bloqueia_nova_inscricao(self):
+        self.corrida_1.limite_inscritos = 1
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        self.criar_inscricao_extra(pago=True)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(),
+        )
+
+        self.assertContains(response, "Inscrições esgotadas")
+        self.assertFalse(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_inscricoes_nao_pagas_nao_ocupam_vaga(self):
+        self.corrida_1.limite_inscritos = 1
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        self.criar_inscricao_extra(pago=False)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.corrida_1.vagas_ocupadas, 0)
+        self.assertTrue(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_evento_esgotado_exibe_mensagem(self):
+        self.corrida_1.limite_inscritos = 1
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        self.criar_inscricao_extra(pago=True)
+
+        response = self.client.get(reverse("inscrever_corrida", args=[self.corrida_1.id]))
+
+        self.assertContains(response, "Inscrições esgotadas")
+        self.assertNotContains(response, "Buscar dados")
+
+    def test_aumentar_limite_permite_nova_inscricao(self):
+        self.corrida_1.limite_inscritos = 1
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        self.criar_inscricao_extra(pago=True)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(),
+        )
+        self.assertContains(response, "Inscrições esgotadas")
+
+        self.corrida_1.limite_inscritos = 2
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_post_direto_em_evento_esgotado_e_bloqueado(self):
+        self.corrida_1.limite_inscritos = 1
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        self.criar_inscricao_extra(pago=True)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(),
+        )
+
+        self.assertContains(response, "Inscrições esgotadas")
+        self.assertFalse(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_inscricao_existente_em_evento_esgotado_nao_duplica_nem_quebra(self):
+        Inscricao.objects.create(
+            participante=self.participante,
+            corrida=self.corrida_1,
+            percurso=self.percurso_5k,
+            pago=False,
+        )
+        self.corrida_1.limite_inscritos = 1
+        self.corrida_1.save(update_fields=["limite_inscritos"])
+        self.criar_inscricao_extra(pago=True)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            self.payload_inscricao(cidade="Votorantim"),
+        )
+
+        self.assertContains(response, "Você já estava inscrito nesta corrida.")
+        self.assertEqual(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).count(),
+            1,
+        )
+        self.participante.refresh_from_db()
+        self.assertEqual(self.participante.cidade, "Votorantim")
+
+    def test_categoria_e_calculada_pela_data_de_nascimento(self):
+        casos = [
+            (date(2013, 6, 30), ""),
+            (date(2012, 6, 30), "Menor de 18"),
+            (date(2010, 6, 30), "Menor de 18"),
+            (date(2008, 6, 30), "18-24"),
+            (date(2001, 6, 30), "25-29"),
+            (date(1996, 6, 30), "30-34"),
+            (date(1989, 11, 7), "35-39"),
+            (date(1986, 6, 30), "40-44"),
+            (date(1961, 6, 30), "65-69"),
+            (date(1950, 6, 30), "65+"),
+        ]
+
+        for data_nascimento, categoria_esperada in casos:
+            with self.subTest(data_nascimento=data_nascimento):
+                categoria = calcular_categoria_por_data_nascimento(
+                    data_nascimento,
+                    referencia=date(2026, 6, 30),
+                )
+                self.assertEqual(categoria, categoria_esperada)
+
+    def test_nascimento_1989_11_07_fica_em_35_39(self):
+        categoria = calcular_categoria_por_data_nascimento(
+            date(1989, 11, 7),
+            referencia=date(2026, 6, 30),
+        )
+
+        self.assertEqual(categoria, "35-39")
+
+    def test_participante_com_13_anos_nao_consegue_se_inscrever(self):
+        self.corrida_1.data = date(2026, 6, 30)
+        self.corrida_1.save(update_fields=["data"])
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            {
+                "cpf": CPF_VALIDO,
+                "nome": "Joao Corredor",
+                "data_nascimento": "2013-06-30",
+                "sexo": "M",
+                "tamanho_camisa": "M",
+                "cidade": "Sorocaba",
+                "equipe": "Equipe A",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            "Nao e permitido realizar inscricao para participantes menores de 14 anos.",
+        )
+        self.assertFalse(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_participante_que_ainda_nao_completou_14_nao_consegue_se_inscrever(self):
+        self.corrida_1.data = date(2026, 6, 30)
+        self.corrida_1.save(update_fields=["data"])
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            {
+                "cpf": CPF_VALIDO,
+                "nome": "Joao Corredor",
+                "data_nascimento": "2012-07-01",
+                "sexo": "M",
+                "tamanho_camisa": "M",
+                "cidade": "Sorocaba",
+                "equipe": "Equipe A",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            "Nao e permitido realizar inscricao para participantes menores de 14 anos.",
+        )
+        self.assertFalse(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_participante_com_14_anos_completos_consegue_se_inscrever(self):
+        self.corrida_1.data = date(2026, 6, 30)
+        self.corrida_1.save(update_fields=["data"])
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            {
+                "cpf": CPF_VALIDO,
+                "nome": "Joao Corredor",
+                "data_nascimento": "2012-06-30",
+                "sexo": "M",
+                "tamanho_camisa": "M",
+                "cidade": "Sorocaba",
+                "equipe": "Equipe A",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.participante.refresh_from_db()
+        self.assertEqual(self.participante.categoria, "Menor de 18")
+        self.assertTrue(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_post_malicioso_nao_burla_idade_minima(self):
+        self.corrida_1.data = date(2026, 6, 30)
+        self.corrida_1.save(update_fields=["data"])
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            {
+                "cpf": CPF_VALIDO,
+                "nome": "Joao Corredor",
+                "data_nascimento": "2013-06-30",
+                "categoria": "35-39",
+                "sexo": "M",
+                "tamanho_camisa": "M",
+                "cidade": "Sorocaba",
+                "equipe": "Equipe A",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            "Nao e permitido realizar inscricao para participantes menores de 14 anos.",
+        )
+        self.assertFalse(
+            Inscricao.objects.filter(
+                participante=self.participante,
+                corrida=self.corrida_1,
+            ).exists()
+        )
+
+    def test_model_inscricao_bloqueia_participante_menor_de_14_anos(self):
+        self.corrida_1.data = date(2026, 6, 30)
+        self.corrida_1.save(update_fields=["data"])
+        usuario_menor = User.objects.create_user(
+            username=CPF_VALIDO_2,
+            password="SenhaForte123!",
+        )
+        participante_menor = Participante.objects.create(
+            usuario=usuario_menor,
+            nome="Atleta Menor",
+            cpf=CPF_VALIDO_2,
+            data_nascimento=date(2013, 6, 30),
+            sexo="M",
+            tamanho_camisa="M",
+            cidade="Sorocaba",
+        )
+
+        with self.assertRaises(ValidationError):
+            Inscricao.objects.create(
+                participante=participante_menor,
+                corrida=self.corrida_1,
+                percurso=self.percurso_5k,
+            )
+
+    def test_inscricao_ignora_categoria_manual_enviada_pelo_usuario(self):
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            {
+                "cpf": CPF_VALIDO,
+                "nome": "Joao Corredor",
+                "data_nascimento": "1991-04-20",
+                "categoria": "65+",
+                "sexo": "M",
+                "tamanho_camisa": "M",
+                "cidade": "Sorocaba",
+                "equipe": "Equipe A",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.participante.refresh_from_db()
+        self.assertEqual(self.participante.categoria, "35-39")
+
+    def test_alteracao_da_data_de_nascimento_atualiza_categoria(self):
+        hoje = date.today()
+        nova_data = date(hoje.year - 22, hoje.month, hoje.day)
+
+        response = self.client.post(
+            reverse("inscrever_corrida", args=[self.corrida_1.id]),
+            {
+                "cpf": CPF_VALIDO,
+                "nome": "Joao Corredor",
+                "data_nascimento": nova_data.isoformat(),
+                "sexo": "M",
+                "tamanho_camisa": "M",
+                "cidade": "Sorocaba",
+                "equipe": "Equipe A",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.participante.refresh_from_db()
+        self.assertEqual(self.participante.data_nascimento, nova_data)
+        self.assertEqual(self.participante.categoria, "18-24")
+
+    def test_formulario_de_inscricao_exibe_categoria_somente_visual(self):
+        response = self.client.get(reverse("inscrever_corrida", args=[self.corrida_1.id]))
+
+        self.assertContains(response, 'id="categoria"')
+        self.assertContains(response, 'id="categoria-referencia-data"')
+        self.assertContains(response, "Informe a data de nascimento")
+        self.assertNotContains(response, 'name="categoria"')
+        self.assertContains(response, "Para alterar a categoria, ajuste a data de nascimento.")
+
+    def test_busca_cpf_retorna_categoria_calculada_quando_campo_esta_vazio(self):
+        Participante.objects.filter(pk=self.participante.pk).update(categoria="")
+        self.participante.refresh_from_db()
+
+        response = self.client.get(
+            reverse("buscar_usuario_cpf"),
+            {"cpf": CPF_VALIDO},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["categoria"], "35-39")
 
     def test_mesmo_participante_pode_se_inscrever_em_multiplas_corridas(self):
         for corrida in (self.corrida_1, self.corrida_2):
@@ -326,10 +745,12 @@ class CorridaAdminFluxoTests(TestCase):
         request.user = self.admin_user
         return request
 
-    def test_criacao_de_corrida_nao_exibe_inlines_dependentes_de_corrida_salva(self):
+    def test_criacao_de_corrida_exibe_apenas_inline_de_percursos(self):
         inlines = self.model_admin.get_inline_instances(self._request(), obj=None)
+        inline_models = {inline.model for inline in inlines}
 
-        self.assertEqual(inlines, [])
+        self.assertIn(PercursoCorrida, inline_models)
+        self.assertNotIn(Inscricao, inline_models)
 
     def test_edicao_de_corrida_exibe_inlines_de_percurso_e_inscricao(self):
         corrida = Corrida.objects.create(
@@ -373,7 +794,6 @@ class CorridaAdminFluxoTests(TestCase):
             model_names,
             [
                 "Corrida",
-                "PercursoCorrida",
                 "Participante",
                 "Inscricao",
                 "ArquivoExcel",
@@ -381,6 +801,136 @@ class CorridaAdminFluxoTests(TestCase):
                 "Corredor",
             ],
         )
+        self.assertIn(PercursoCorrida, admin.site._registry)
+        self.assertNotIn("PercursoCorrida", model_names)
+
+    def test_inline_percurso_bloqueia_exclusao_quando_tem_inscricao(self):
+        corrida = Corrida.objects.create(
+            nome="Corrida Admin",
+            local="Sorocaba",
+            data=date.today(),
+        )
+        percurso = PercursoCorrida.objects.create(
+            corrida=corrida,
+            nome="5 km",
+            distancia_km=5,
+        )
+        participante = Participante.objects.create(
+            nome="Atleta Inline",
+            cpf="12312312312",
+            data_nascimento=date(1990, 1, 1),
+            sexo="M",
+            tamanho_camisa="M",
+        )
+        Inscricao.objects.create(
+            participante=participante,
+            corrida=corrida,
+            percurso=percurso,
+        )
+        inline = next(
+            inline
+            for inline in self.model_admin.get_inline_instances(self._request(), obj=corrida)
+            if inline.model is PercursoCorrida
+        )
+        formset_class = inline.get_formset(self._request(), obj=corrida)
+        prefix = formset_class(instance=corrida).prefix
+        data = {
+            f"{prefix}-TOTAL_FORMS": "1",
+            f"{prefix}-INITIAL_FORMS": "1",
+            f"{prefix}-MIN_NUM_FORMS": "0",
+            f"{prefix}-MAX_NUM_FORMS": "1000",
+            f"{prefix}-0-id": str(percurso.pk),
+            f"{prefix}-0-corrida": str(corrida.pk),
+            f"{prefix}-0-nome": percurso.nome,
+            f"{prefix}-0-distancia_km": "5",
+            f"{prefix}-0-ativo": "on",
+            f"{prefix}-0-ordem": "0",
+            f"{prefix}-0-DELETE": "on",
+        }
+
+        formset = formset_class(data=data, instance=corrida, prefix=prefix)
+
+        self.assertFalse(formset.is_valid())
+        self.assertIn("Nao e possivel remover", str(formset.non_form_errors()))
+
+    def test_corrida_admin_tem_atalhos_operacionais_por_evento(self):
+        corrida = Corrida.objects.create(
+            nome="Corrida Admin",
+            local="Sorocaba",
+            data=date.today(),
+        )
+
+        inscricoes_link = str(self.model_admin.inscricoes_evento(corrida))
+        chips_link = str(self.model_admin.chips_evento(corrida))
+        inscricoes_url = reverse("admin:api_s_inscricao_changelist")
+
+        self.assertIn(inscricoes_url, inscricoes_link)
+        self.assertIn(f"corrida__id__exact={corrida.id}", inscricoes_link)
+        self.assertIn(inscricoes_url, chips_link)
+        self.assertIn(f"corrida__id__exact={corrida.id}", chips_link)
+        self.assertIn("pago__exact=1", chips_link)
+
+    def test_inscricao_admin_permite_atribuicao_de_chip_na_lista(self):
+        model_admin = InscricaoAdmin(Inscricao, admin.site)
+
+        self.assertIn("numero_chip", model_admin.list_display)
+        self.assertIn("numero_chip", model_admin.list_editable)
+        self.assertIn("corrida", model_admin.list_filter)
+        self.assertIn("cidade_participante", model_admin.list_display)
+        self.assertIn("cidade", model_admin.fields)
+        self.assertNotIn("cidade", model_admin.readonly_fields)
+
+        participante = Participante.objects.create(
+            nome="Atleta Cidade",
+            cpf="12345678901",
+            data_nascimento=date(1990, 1, 1),
+            sexo="M",
+            tamanho_camisa="M",
+            cidade="Itarare",
+        )
+        corrida = Corrida.objects.create(
+            nome="Corrida Cidade",
+            local="Itarare",
+            data=date.today(),
+        )
+        percurso = PercursoCorrida.objects.create(
+            corrida=corrida,
+            nome="5 km",
+            distancia_km=5,
+        )
+        inscricao = Inscricao.objects.create(
+            participante=participante,
+            corrida=corrida,
+            percurso=percurso,
+        )
+
+        self.assertEqual(model_admin.cidade_participante(inscricao), "Itarare")
+        self.assertEqual(model_admin.cidade_participante(None), "-")
+
+        form = InscricaoAdminForm(instance=inscricao)
+        self.assertIn("cidade", form.fields)
+        self.assertEqual(form.initial["cidade"], "Itarare")
+
+        participante.cidade = ""
+        participante.save(update_fields=["cidade"])
+        form = InscricaoAdminForm(
+            data={
+                "participante": str(participante.pk),
+                "cidade": "Itarare",
+                "corrida": str(corrida.pk),
+                "percurso": str(percurso.pk),
+                "pago": "",
+                "numero_chip": "",
+            },
+            instance=inscricao,
+            corrida_id=corrida.pk,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+        model_admin.save_model(self._request(), form.save(commit=False), form, change=True)
+
+        participante.refresh_from_db()
+        self.assertEqual(participante.cidade, "Itarare")
 
 
 @override_settings(STORAGES=TEST_STORAGES)
@@ -662,8 +1212,34 @@ class ResultadoPercursoTests(TestCase):
         self.assertTrue(Participante.objects.filter(pk=participante_10k.pk).exists())
         self.assertTrue(User.objects.filter(pk=user_10k.pk).exists())
 
-    def test_excluir_percurso_com_resultado_publicado_continua_protegido(self):
-        ArquivoExcel.objects.create(
+    def test_excluir_percurso_com_resultado_publicado_remove_resultado_dependente(self):
+        resultado = ArquivoExcel.objects.create(
+            percurso=self.percurso_7k,
+            nome="Resultados 7 km",
+            data_corrida="01/05/2026",
+            local="Sorocaba",
+            arquivo="uploads/resultado-7k.xlsx",
+        )
+        corredor = Corredor.objects.create(
+            arquivo=resultado,
+            colocacao=1,
+            numero="7",
+            nome="Atleta Sete",
+            categoria="M 30-39",
+            distancia="7 km",
+            tempo_formatado="00:30:00",
+            Vel_media="14 km/h",
+        )
+
+        self.percurso_7k.delete()
+
+        self.assertFalse(PercursoCorrida.objects.filter(pk=self.percurso_7k.pk).exists())
+        self.assertFalse(ArquivoExcel.objects.filter(pk=resultado.pk).exists())
+        self.assertFalse(Corredor.objects.filter(pk=corredor.pk).exists())
+        self.assertTrue(Corrida.objects.filter(pk=self.corrida.pk).exists())
+
+    def test_excluir_resultado_nao_exclui_evento(self):
+        resultado = ArquivoExcel.objects.create(
             percurso=self.percurso_7k,
             nome="Resultados 7 km",
             data_corrida="01/05/2026",
@@ -671,10 +1247,54 @@ class ResultadoPercursoTests(TestCase):
             arquivo="uploads/resultado-7k.xlsx",
         )
 
-        with self.assertRaises(ProtectedError):
-            self.percurso_7k.delete()
+        resultado.delete()
 
+        self.assertFalse(ArquivoExcel.objects.filter(pk=resultado.pk).exists())
+        self.assertTrue(Corrida.objects.filter(pk=self.corrida.pk).exists())
         self.assertTrue(PercursoCorrida.objects.filter(pk=self.percurso_7k.pk).exists())
+
+    def test_admin_exclui_evento_com_resultados_em_cascata(self):
+        resultado_percurso = ArquivoExcel.objects.create(
+            percurso=self.percurso_7k,
+            nome="Resultados 7 km",
+            data_corrida="01/05/2026",
+            local="Sorocaba",
+            arquivo="uploads/resultado-7k.xlsx",
+        )
+        resultado_geral = ArquivoExcel.objects.create(
+            corrida=self.corrida,
+            nome="Resultado Geral",
+            data_corrida="01/05/2026",
+            local="Sorocaba",
+            arquivo="uploads/resultado-geral.xlsx",
+        )
+        corredor = Corredor.objects.create(
+            arquivo=resultado_percurso,
+            colocacao=1,
+            numero="7",
+            nome="Atleta Sete",
+            categoria="M 30-39",
+            distancia="7 km",
+            tempo_formatado="00:30:00",
+            Vel_media="14 km/h",
+        )
+        request = RequestFactory().post("/admin/api_s/corrida/")
+        request.user = User.objects.create_superuser(
+            username="admin-delete-evento",
+            email="admin-delete@example.com",
+            password="SenhaForte123!",
+        )
+        model_admin = CorridaAdmin(Corrida, admin.site)
+
+        model_admin.delete_model(request, self.corrida)
+
+        self.assertFalse(Corrida.objects.filter(pk=self.corrida.pk).exists())
+        self.assertFalse(PercursoCorrida.objects.filter(pk=self.percurso_7k.pk).exists())
+        self.assertFalse(PercursoCorrida.objects.filter(pk=self.percurso_10k.pk).exists())
+        self.assertFalse(ArquivoExcel.objects.filter(pk=resultado_percurso.pk).exists())
+        self.assertFalse(ArquivoExcel.objects.filter(pk=resultado_geral.pk).exists())
+        self.assertFalse(Corredor.objects.filter(pk=corredor.pk).exists())
+        self.assertTrue(Corrida.objects.filter(pk=self.outra_corrida.pk).exists())
 
     def test_pagina_corrida_filtra_resultado_unico_por_distancia(self):
         resultado = ArquivoExcel.objects.create(
@@ -1301,3 +1921,272 @@ class CronometragemAPITests(TestCase):
         resultado.refresh_from_db()
         self.assertEqual(resultado.tempo, "00:25:09.900")
         self.assertEqual(ResultadoInscricao.objects.filter(inscricao=self.inscricao_paga).count(), 1)
+
+
+@override_settings(
+    CRONOMETRAGEM_RECEIVER_URL="http://127.0.0.1:8001/api/inscricoes/receber",
+    CRONOMETRAGEM_RECEIVER_API_KEY="secret-api-key",
+    CRONOMETRAGEM_RECEIVER_TIMEOUT=2,
+)
+class CronometragemReceiverEnvioTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.admin_user = User.objects.create_superuser(
+            username="admin-cronometragem",
+            email="admin@example.com",
+            password="SenhaForte123!",
+        )
+        self.corrida = Corrida.objects.create(
+            nome="Corrida Receiver",
+            local="Sorocaba",
+            data=date.today() + timedelta(days=10),
+        )
+        self.percurso = PercursoCorrida.objects.create(
+            corrida=self.corrida,
+            nome="5 km",
+            distancia_km=5,
+        )
+        self._cpf_indice = 10000000000
+
+    def criar_participante(self, nome="Atleta Receiver"):
+        self._cpf_indice += 1
+        return Participante.objects.create(
+            nome=nome,
+            cpf=str(self._cpf_indice),
+            data_nascimento=date(1990, 1, 1),
+            sexo="M",
+            tamanho_camisa="M",
+            cidade="Sao Paulo",
+            equipe="Equipe X",
+        )
+
+    def criar_inscricao(self, pago=False, enviada=False, nome="Atleta Receiver"):
+        return Inscricao.objects.create(
+            participante=self.criar_participante(nome=nome),
+            corrida=self.corrida,
+            percurso=self.percurso,
+            pago=pago,
+            enviada_cronometragem=enviada,
+        )
+
+    def criar_inscricao_sem_disparo(self, pago=False, enviada=False, nome="Atleta Receiver"):
+        inscricao = self.criar_inscricao(pago=False, enviada=False, nome=nome)
+        Inscricao.objects.filter(pk=inscricao.pk).update(
+            pago=pago,
+            enviada_cronometragem=enviada,
+        )
+        inscricao.refresh_from_db()
+        return inscricao
+
+    def test_inscricao_paga_e_enviada_automaticamente(self):
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.return_value = Mock(status_code=201, text="")
+
+            with self.captureOnCommitCallbacks(execute=True):
+                inscricao = self.criar_inscricao(pago=True)
+
+        post.assert_called_once()
+        _, kwargs = post.call_args
+        self.assertEqual(
+            post.call_args[0][0],
+            "http://127.0.0.1:8001/api/inscricoes/receber",
+        )
+        self.assertEqual(kwargs["headers"]["Authorization"], "Api-Key secret-api-key")
+        self.assertEqual(kwargs["timeout"], 2)
+        self.assertEqual(kwargs["json"]["inscricao_id"], inscricao.id)
+        self.assertEqual(kwargs["json"]["evento_id"], self.corrida.id)
+        self.assertEqual(kwargs["json"]["evento_nome"], self.corrida.nome)
+        self.assertEqual(kwargs["json"]["percurso_id"], self.percurso.id)
+        self.assertEqual(kwargs["json"]["percurso_nome"], "5 Km")
+        self.assertEqual(kwargs["json"]["nome"], "Atleta Receiver")
+        self.assertEqual(kwargs["json"]["sexo"], "Masculino")
+        self.assertEqual(kwargs["json"]["categoria"], "35 a 39 anos")
+        self.assertNotIn("cpf", kwargs["json"])
+        self.assertNotIn("numero_chip", kwargs["json"])
+
+        inscricao.refresh_from_db()
+        self.assertTrue(inscricao.enviada_cronometragem)
+        self.assertIsNotNone(inscricao.data_envio_cronometragem)
+        self.assertEqual(inscricao.erro_envio_cronometragem, "")
+
+    def test_inscricao_nao_paga_nao_e_enviada_automaticamente(self):
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            with self.captureOnCommitCallbacks(execute=True):
+                inscricao = self.criar_inscricao(pago=False)
+
+        post.assert_not_called()
+        inscricao.refresh_from_db()
+        self.assertFalse(inscricao.enviada_cronometragem)
+
+    def test_inscricao_ja_enviada_nao_e_reenviada_automaticamente(self):
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            with self.captureOnCommitCallbacks(execute=True):
+                inscricao = self.criar_inscricao(pago=True, enviada=True)
+
+        post.assert_not_called()
+        inscricao.refresh_from_db()
+        self.assertTrue(inscricao.enviada_cronometragem)
+
+    def test_alteracao_relevante_em_inscricao_ja_enviada_reenvia_mesmo_inscricao_id(self):
+        inscricao = self.criar_inscricao_sem_disparo(pago=True, enviada=True)
+        novo_percurso = PercursoCorrida.objects.create(
+            corrida=self.corrida,
+            nome="10 km",
+            distancia_km=10,
+        )
+
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.return_value = Mock(status_code=200, text="")
+
+            with self.captureOnCommitCallbacks(execute=True):
+                inscricao.percurso = novo_percurso
+                inscricao.save(update_fields=["percurso", "atualizada_em"])
+
+        post.assert_called_once()
+        _, kwargs = post.call_args
+        self.assertEqual(kwargs["json"]["inscricao_id"], inscricao.id)
+        self.assertEqual(kwargs["json"]["percurso_id"], novo_percurso.id)
+        self.assertEqual(kwargs["json"]["percurso_nome"], "10 Km")
+        self.assertNotIn("numero_chip", kwargs["json"])
+
+    def test_alteracao_relevante_em_participante_reenvia_inscricoes_ja_enviadas(self):
+        inscricao = self.criar_inscricao_sem_disparo(pago=True, enviada=True)
+        participante = inscricao.participante
+
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.return_value = Mock(status_code=200, text="")
+
+            with self.captureOnCommitCallbacks(execute=True):
+                participante.nome = "Atleta Atualizado"
+                participante.cidade = "Campinas"
+                participante.equipe = "Equipe Atualizada"
+                participante.save(update_fields=["nome", "cidade", "equipe"])
+
+        post.assert_called_once()
+        _, kwargs = post.call_args
+        self.assertEqual(kwargs["json"]["inscricao_id"], inscricao.id)
+        self.assertEqual(kwargs["json"]["nome"], "Atleta Atualizado")
+        self.assertEqual(kwargs["json"]["cidade"], "Campinas")
+        self.assertEqual(kwargs["json"]["equipe"], "Equipe Atualizada")
+
+    def test_alteracao_em_corrida_reenvia_inscricoes_ja_enviadas(self):
+        inscricao = self.criar_inscricao_sem_disparo(pago=True, enviada=True)
+
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.return_value = Mock(status_code=200, text="")
+
+            with self.captureOnCommitCallbacks(execute=True):
+                self.corrida.nome = "Corrida Atualizada"
+                self.corrida.save(update_fields=["nome"])
+
+        post.assert_called_once()
+        _, kwargs = post.call_args
+        self.assertEqual(kwargs["json"]["inscricao_id"], inscricao.id)
+        self.assertEqual(kwargs["json"]["evento_nome"], "Corrida Atualizada")
+
+    def test_alteracao_em_percurso_reenvia_inscricoes_ja_enviadas(self):
+        inscricao = self.criar_inscricao_sem_disparo(pago=True, enviada=True)
+
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.return_value = Mock(status_code=200, text="")
+
+            with self.captureOnCommitCallbacks(execute=True):
+                self.percurso.distancia_km = 7
+                self.percurso.save(update_fields=["distancia_km"])
+
+        post.assert_called_once()
+        _, kwargs = post.call_args
+        self.assertEqual(kwargs["json"]["inscricao_id"], inscricao.id)
+        self.assertEqual(kwargs["json"]["percurso_nome"], "7 Km")
+
+    def test_alteracao_de_chip_nao_reenvia_inscricao_ja_enviada(self):
+        inscricao = self.criar_inscricao_sem_disparo(pago=True, enviada=True)
+
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            with self.captureOnCommitCallbacks(execute=True):
+                inscricao.numero_chip = "RFID-123"
+                inscricao.save(update_fields=["numero_chip", "atualizada_em"])
+
+        post.assert_not_called()
+
+    def test_falha_de_conexao_nao_quebra_salvamento_e_nao_expoe_api_key(self):
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.side_effect = requests_exceptions.ConnectionError(
+                "FastAPI offline secret-api-key"
+            )
+
+            with self.assertLogs("eventos.services.cronometragem_client", level="WARNING") as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    inscricao = self.criar_inscricao(pago=True)
+
+        self.assertTrue(Inscricao.objects.filter(pk=inscricao.pk).exists())
+        inscricao.refresh_from_db()
+        self.assertFalse(inscricao.enviada_cronometragem)
+        self.assertIsNone(inscricao.data_envio_cronometragem)
+        self.assertIn("ConnectionError", inscricao.erro_envio_cronometragem)
+        self.assertNotIn("secret-api-key", inscricao.erro_envio_cronometragem)
+        self.assertNotIn("secret-api-key", "\n".join(logs.output))
+
+    def test_falha_de_conexao_no_reenvio_mantem_inscricao_reenviavel(self):
+        inscricao = self.criar_inscricao_sem_disparo(pago=True, enviada=True)
+        participante = inscricao.participante
+
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.side_effect = requests_exceptions.ConnectionError(
+                "FastAPI offline secret-api-key"
+            )
+
+            with self.assertLogs("eventos.services.cronometragem_client", level="WARNING") as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    participante.cidade = "Campinas"
+                    participante.save(update_fields=["cidade"])
+
+        inscricao.refresh_from_db()
+        self.assertFalse(inscricao.enviada_cronometragem)
+        self.assertIsNone(inscricao.data_envio_cronometragem)
+        self.assertIn("ConnectionError", inscricao.erro_envio_cronometragem)
+        self.assertNotIn("secret-api-key", inscricao.erro_envio_cronometragem)
+        self.assertNotIn("secret-api-key", "\n".join(logs.output))
+
+    def test_admin_action_reenvia_inscricoes_pagas_pendentes_e_ja_enviadas(self):
+        pendente = self.criar_inscricao_sem_disparo(pago=True, nome="Pendente")
+        nao_paga = self.criar_inscricao_sem_disparo(pago=False, nome="Nao Paga")
+        enviada = self.criar_inscricao_sem_disparo(
+            pago=True,
+            enviada=True,
+            nome="Ja Enviada",
+        )
+        request = self.factory.post("/admin/api_s/inscricao/")
+        request.user = self.admin_user
+        model_admin = InscricaoAdmin(Inscricao, admin.site)
+
+        with patch("eventos.services.cronometragem_client.requests.post") as post:
+            post.return_value = Mock(status_code=200, text="")
+            with patch.object(model_admin, "message_user") as message_user:
+                model_admin.reenviar_para_cronometragem(
+                    request,
+                    Inscricao.objects.filter(
+                        pk__in=[pendente.pk, nao_paga.pk, enviada.pk]
+                    ),
+                )
+
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(
+            {call.kwargs["json"]["inscricao_id"] for call in post.call_args_list},
+            {pendente.id, enviada.id},
+        )
+        pendente.refresh_from_db()
+        nao_paga.refresh_from_db()
+        enviada.refresh_from_db()
+        self.assertTrue(pendente.enviada_cronometragem)
+        self.assertFalse(nao_paga.enviada_cronometragem)
+        self.assertTrue(enviada.enviada_cronometragem)
+
+        mensagem = message_user.call_args[0][1]
+        self.assertIn("2 enviadas", mensagem)
+        self.assertIn("0 falharam", mensagem)
+        self.assertIn("1 ignoradas", mensagem)
+        self.assertNotIn("secret-api-key", mensagem)
+
+
+

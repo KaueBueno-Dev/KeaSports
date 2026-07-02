@@ -6,6 +6,16 @@
   Inscrição para {{ corrida.nome }}
 </h1>
 
+{% if corrida_esgotada %}
+<div class="max-w-md mx-auto p-6 bg-red-50 rounded shadow text-center">
+  <h2 class="text-2xl font-bold text-red-700">Inscrições esgotadas</h2>
+  <p class="mt-3 text-gray-700">Não há vagas disponíveis para este evento no momento.</p>
+  <a href="{% url 'listar_corridas' %}" class="mt-5 inline-block text-blue-600 hover:underline font-medium">
+    Voltar para a lista de corridas
+  </a>
+</div>
+{% else %}
+
 <!-- ETAPA 1: Busca por CPF -->
 <div id="etapa-cpf" class="max-w-md mx-auto p-6 bg-white rounded shadow space-y-6">
   <h2 class="text-xl font-semibold text-gray-700">Digite seu CPF para buscar seus dados</h2>
@@ -59,6 +69,11 @@
         required
         class="px-3 py-2 rounded w-full border border-gray-300 focus:border-blue-500 focus:ring focus:ring-blue-200"
       />
+      {% if form.data_nascimento.errors %}
+        <div class="mt-2 rounded bg-red-50 p-2 text-sm font-medium text-red-700">
+          {{ form.data_nascimento.errors|striptags }}
+        </div>
+      {% endif %}
     </div>
 
     <div>
@@ -70,6 +85,17 @@
         required
         class="px-3 py-2 rounded w-full border border-gray-300 focus:border-blue-500 focus:ring focus:ring-blue-200"
       />
+    </div>
+
+    <div>
+      <span class="block font-medium mb-1">Categoria</span>
+      <div
+        id="categoria"
+        class="px-3 py-2 rounded w-full border border-gray-300 bg-gray-50 text-gray-700"
+      >
+        Informe a data de nascimento
+      </div>
+      <p class="mt-1 text-xs text-gray-500">Para alterar a categoria, ajuste a data de nascimento.</p>
     </div>
 
     <div>
@@ -174,8 +200,15 @@
   </a>
 </div>
 
+{{ categorias_idade|json_script:"categorias-idade-data" }}
+{{ categoria_referencia|json_script:"categoria-referencia-data" }}
+{{ idade_minima_inscricao|json_script:"idade-minima-inscricao-data" }}
+
 <script>
 document.addEventListener('DOMContentLoaded', function () {
+  const categoriasIdade = JSON.parse(document.getElementById('categorias-idade-data').textContent);
+  const categoriaReferencia = JSON.parse(document.getElementById('categoria-referencia-data').textContent);
+  const idadeMinimaInscricao = JSON.parse(document.getElementById('idade-minima-inscricao-data').textContent);
   const cpfInput = document.getElementById('cpf-input');
   const btnBuscar = document.getElementById('btn-buscar-cpf');
   const loading = document.getElementById('cpf-loading');
@@ -184,6 +217,55 @@ document.addEventListener('DOMContentLoaded', function () {
   const etapaForm = document.getElementById('etapa-form');
   const cpfHidden = document.getElementById('cpf-hidden');
   const btnVoltar = document.getElementById('btn-voltar');
+  const dataNascimentoInput = document.getElementById('data_nascimento');
+  const categoriaDisplay = document.getElementById('categoria');
+
+  function calcularIdade(dataNascimento) {
+    if (!dataNascimento) return null;
+
+    const nascimento = new Date(dataNascimento + 'T00:00:00');
+    if (Number.isNaN(nascimento.getTime())) return null;
+
+    const referencia = categoriaReferencia
+      ? new Date(categoriaReferencia + 'T00:00:00')
+      : new Date();
+
+    if (Number.isNaN(referencia.getTime()) || nascimento > referencia) return null;
+
+    let idade = referencia.getFullYear() - nascimento.getFullYear();
+    const aniversarioJaPassou =
+      referencia.getMonth() > nascimento.getMonth() ||
+      (referencia.getMonth() === nascimento.getMonth() && referencia.getDate() >= nascimento.getDate());
+
+    if (!aniversarioJaPassou) idade -= 1;
+    return idade;
+  }
+
+  function categoriaPorIdade(idade) {
+    if (idade === null) return '';
+    if (idade < idadeMinimaInscricao) return '';
+
+    for (const item of categoriasIdade) {
+      const idadeMaxima = item[0];
+      const categoria = item[1];
+      if (idadeMaxima === null || idade <= idadeMaxima) {
+        return categoria;
+      }
+    }
+
+    return '';
+  }
+
+  function exibirCategoria(categoria) {
+    categoriaDisplay.textContent = categoria || 'Informe a data de nascimento';
+  }
+
+  function atualizarCategoria() {
+    exibirCategoria(categoriaPorIdade(calcularIdade(dataNascimentoInput.value)));
+  }
+
+  dataNascimentoInput.addEventListener('input', atualizarCategoria);
+  dataNascimentoInput.addEventListener('change', atualizarCategoria);
 
   // Máscara de CPF
   cpfInput.addEventListener('input', function (e) {
@@ -264,9 +346,11 @@ document.addEventListener('DOMContentLoaded', function () {
         if (data.encontrado) {
           // Preencher formulário
           document.getElementById('nome').value = data.nome || '';
-          document.getElementById('data_nascimento').value = data.data_nascimento || '';
+          dataNascimentoInput.value = data.data_nascimento || '';
           document.getElementById('cidade').value = data.cidade || '';
           document.getElementById('equipe').value = data.equipe || '';
+          exibirCategoria(data.categoria);
+          atualizarCategoria();
           
           // Para selects, precisamos selecionar a option correta
           var selectSexo = document.getElementById('sexo');
@@ -293,5 +377,7 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 });
 </script>
+
+{% endif %}
 
 {% endblock %}

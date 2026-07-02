@@ -5,16 +5,22 @@ from collections import defaultdict
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
+from django.db.models import Count, Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 
 from eventos.forms import ParticipanteForm
 from eventos.models import ArquivoExcel, Corredor, Corrida, Inscricao, Participante
+from eventos.services.categorias import (
+    CATEGORIAS_POR_IDADE,
+    IDADE_MINIMA_INSCRICAO,
+    calcular_categoria_por_data_nascimento,
+)
 
 
 RANKINKG_CATEGORIAS = [
-    "15 - 19",
-    "20 - 24",
+    "Menor de 18",
+    "18 - 24",
     "25 - 29",
     "30 - 34",
     "35 - 39",
@@ -23,6 +29,7 @@ RANKINKG_CATEGORIAS = [
     "50 - 54",
     "55 - 59",
     "60 - 64",
+    "65 - 69",
     "65+",
 ]
 RANKINKG_SEXOS = [
@@ -34,7 +41,7 @@ PONTOS_CATEGORIA = [10, 8, 6, 4, 2, 1, 1, 1, 1, 1]
 
 
 def index(request):
-    corridas = Corrida.objects.all().order_by("-data")[:3]
+    corridas = corridas_com_vagas(Corrida.objects.all().order_by("-data"))[:3]
     arquivos_recentes = (
         ArquivoExcel.objects
         .select_related("corrida", "percurso__corrida")
@@ -64,8 +71,44 @@ def index(request):
 
 
 def listar_corridas(request):
-    corridas = Corrida.objects.all()
+    corridas = corridas_com_vagas(Corrida.objects.all())
     return render(request, "eventos/corrida/listar_corridas.html", {"corridas": corridas})
+
+
+def corridas_com_vagas(queryset):
+    return queryset.annotate(
+        vagas_ocupadas_pagas=Count(
+            "inscricoes",
+            filter=Q(inscricoes__pago=True),
+            distinct=True,
+        )
+    )
+
+
+def render_inscricao_corrida(
+    request,
+    corrida,
+    form,
+    percursos,
+    percurso_error=None,
+    status=200,
+):
+    return render(
+        request,
+        "eventos/corrida/inscrever_corrida.html",
+        {
+            "form": form,
+            "corrida": corrida,
+            "percursos": percursos,
+            "percurso_error": percurso_error,
+            "buscar_url": "buscar_usuario_cpf",
+            "categorias_idade": CATEGORIAS_POR_IDADE,
+            "categoria_referencia": corrida.data.strftime("%Y-%m-%d"),
+            "idade_minima_inscricao": IDADE_MINIMA_INSCRICAO,
+            "corrida_esgotada": corrida.esta_esgotada,
+        },
+        status=status,
+    )
 
 
 def _normalizar_texto(valor):
@@ -76,6 +119,9 @@ def _normalizar_texto(valor):
 
 def _normalizar_categoria(valor):
     texto = _normalizar_texto(valor)
+
+    if "menor" in texto and "18" in texto:
+        return "Menor de 18"
 
     if "65" in texto and ("+" in texto or "mais" in texto):
         return "65+"
@@ -323,6 +369,9 @@ def buscar_usuario_cpf(request):
 
         try:
             participante = Participante.objects.get(cpf=cpf_limpo)
+            categoria = participante.categoria or calcular_categoria_por_data_nascimento(
+                participante.data_nascimento
+            )
             dados = {
                 "encontrado": True,
                 "nome": participante.nome,
@@ -333,6 +382,7 @@ def buscar_usuario_cpf(request):
                 "equipe": participante.equipe or "",
                 "sexo": participante.sexo or "",
                 "tamanho_camisa": participante.tamanho_camisa or "M",
+                "categoria": categoria or "",
             }
             return JsonResponse(dados)
         except Participante.DoesNotExist:
@@ -384,6 +434,8 @@ def inscrever_corrida(request, corrida_id):
         if not request.user.is_staff and cpf != request.user.username:
             raise PermissionDenied("Voce nao pode inscrever outro CPF.")
 
+        participante_existente = None
+        inscricao_existente = None
         try:
             participante_existente = Participante.objects.get(cpf=cpf)
             if (
@@ -392,22 +444,69 @@ def inscrever_corrida(request, corrida_id):
                 and not request.user.is_staff
             ):
                 raise PermissionDenied("Participante pertence a outro usuario.")
-            form = ParticipanteForm(request.POST, instance=participante_existente)
+            form = ParticipanteForm(
+                request.POST,
+                instance=participante_existente,
+                categoria_referencia=corrida.data,
+            )
         except Participante.DoesNotExist:
-            form = ParticipanteForm(request.POST)
+            form = ParticipanteForm(
+                request.POST,
+                categoria_referencia=corrida.data,
+            )
+
+        if participante_existente:
+            inscricao_existente = Inscricao.objects.filter(
+                participante=participante_existente,
+                corrida=corrida,
+            ).first()
+
+        if corrida.esta_esgotada and inscricao_existente is None:
+            return render_inscricao_corrida(
+                request,
+                corrida,
+                form,
+                percursos,
+                percurso_error=percurso_error,
+            )
 
         if form.is_valid() and not percurso_error:
             with transaction.atomic():
+                corrida_bloqueada = Corrida.objects.select_for_update().get(pk=corrida.pk)
+                inscricao = None
+                criada = False
+                if participante_existente:
+                    inscricao = (
+                        Inscricao.objects
+                        .select_for_update()
+                        .filter(
+                            participante=participante_existente,
+                            corrida=corrida_bloqueada,
+                        )
+                        .first()
+                    )
+                if not inscricao and corrida_bloqueada.esta_esgotada:
+                    return render_inscricao_corrida(
+                        request,
+                        corrida_bloqueada,
+                        form,
+                        percursos,
+                        percurso_error=percurso_error,
+                    )
+
                 participante = form.save(commit=False)
                 participante.cpf = cpf
                 if not participante.usuario_id:
                     participante.usuario = request.user
+                participante._categoria_referencia = corrida.data
                 participante.save()
-                inscricao, criada = Inscricao.objects.get_or_create(
-                    participante=participante,
-                    corrida=corrida,
-                    defaults={"percurso": percurso},
-                )
+
+                if inscricao is None:
+                    inscricao, criada = Inscricao.objects.get_or_create(
+                        participante=participante,
+                        corrida=corrida_bloqueada,
+                        defaults={"percurso": percurso},
+                    )
                 if not criada and not inscricao.percurso_id:
                     inscricao.percurso = percurso
                     inscricao.save(update_fields=["percurso", "atualizada_em"])
@@ -423,16 +522,12 @@ def inscrever_corrida(request, corrida_id):
                 },
             )
     else:
-        form = ParticipanteForm()
+        form = ParticipanteForm(categoria_referencia=corrida.data)
 
-    return render(
+    return render_inscricao_corrida(
         request,
-        "eventos/corrida/inscrever_corrida.html",
-        {
-            "form": form,
-            "corrida": corrida,
-            "percursos": percursos,
-            "percurso_error": percurso_error,
-            "buscar_url": "buscar_usuario_cpf",
-        },
+        corrida,
+        form,
+        percursos,
+        percurso_error=percurso_error,
     )

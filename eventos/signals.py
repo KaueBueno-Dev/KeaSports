@@ -6,13 +6,239 @@ from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 from django.db import transaction
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
-from .models import ArquivoExcel, Corredor
+from .models import ArquivoExcel, Corredor, Corrida, Inscricao, Participante, PercursoCorrida
 
 
 logger = logging.getLogger(__name__)
+
+
+INSCRICAO_REENVIO_FIELDS = ("participante_id", "corrida_id", "percurso_id")
+INSCRICAO_ENVIO_UPDATE_FIELDS = (
+    "pago",
+    "participante",
+    "participante_id",
+    "corrida",
+    "corrida_id",
+    "percurso",
+    "percurso_id",
+)
+PARTICIPANTE_REENVIO_FIELDS = ("nome", "sexo", "categoria", "cidade", "equipe")
+PARTICIPANTE_ENVIO_UPDATE_FIELDS = PARTICIPANTE_REENVIO_FIELDS + ("data_nascimento",)
+CORRIDA_REENVIO_FIELDS = ("nome",)
+PERCURSO_REENVIO_FIELDS = ("nome", "distancia_km")
+
+
+def _valor_sync(valor):
+    if valor is None or isinstance(valor, str):
+        return str(valor or "").strip()
+    return valor
+
+
+def _campos_relevantes_no_update(update_fields, campos):
+    if update_fields is None:
+        return True
+    return bool(set(update_fields) & set(campos))
+
+
+def _campos_foram_alterados(instance, anterior, campos):
+    return any(
+        _valor_sync(getattr(instance, campo)) != _valor_sync(getattr(anterior, campo))
+        for campo in campos
+    )
+
+
+@receiver(pre_save, sender=Inscricao)
+def preparar_envio_inscricao_cronometragem(sender, instance, **kwargs):
+    instance._deve_enviar_cronometragem = False
+    instance._permitir_reenvio_cronometragem = False
+
+    if not _campos_relevantes_no_update(
+        kwargs.get("update_fields"),
+        INSCRICAO_ENVIO_UPDATE_FIELDS,
+    ):
+        return
+
+    if not instance.pago:
+        return
+
+    if not instance.pk:
+        instance._deve_enviar_cronometragem = not instance.enviada_cronometragem
+        return
+
+    try:
+        anterior = sender.objects.only(
+            "pago",
+            "enviada_cronometragem",
+            *INSCRICAO_REENVIO_FIELDS,
+        ).get(pk=instance.pk)
+    except sender.DoesNotExist:
+        instance._deve_enviar_cronometragem = not instance.enviada_cronometragem
+        return
+
+    if not anterior.pago and instance.pago and not instance.enviada_cronometragem:
+        instance._deve_enviar_cronometragem = True
+        return
+
+    if (
+        anterior.pago
+        and anterior.enviada_cronometragem
+        and instance.enviada_cronometragem
+        and _campos_foram_alterados(instance, anterior, INSCRICAO_REENVIO_FIELDS)
+    ):
+        instance._deve_enviar_cronometragem = True
+        instance._permitir_reenvio_cronometragem = True
+
+
+def _enviar_inscricao_cronometragem_pos_commit(inscricao_id, permitir_reenvio=False):
+    try:
+        from eventos.services.cronometragem_client import enviar_inscricao_para_cronometragem
+
+        enviar_inscricao_para_cronometragem(
+            inscricao_id,
+            permitir_reenvio=permitir_reenvio,
+        )
+    except Exception:
+        logger.exception(
+            "Falha inesperada ao enviar Inscricao %s para cronometragem.",
+            inscricao_id,
+        )
+
+
+def _reenviar_inscricoes_cronometragem_pos_commit(queryset):
+    for inscricao_id in queryset.values_list("pk", flat=True):
+        _enviar_inscricao_cronometragem_pos_commit(
+            inscricao_id,
+            permitir_reenvio=True,
+        )
+
+
+def _agendar_reenvio_inscricoes_cronometragem(queryset):
+    transaction.on_commit(
+        lambda: _reenviar_inscricoes_cronometragem_pos_commit(queryset)
+    )
+
+
+@receiver(post_save, sender=Inscricao)
+def enviar_inscricao_cronometragem(sender, instance, **kwargs):
+    if not getattr(instance, "_deve_enviar_cronometragem", False):
+        return
+
+    inscricao_id = instance.pk
+    permitir_reenvio = getattr(instance, "_permitir_reenvio_cronometragem", False)
+    transaction.on_commit(
+        lambda: _enviar_inscricao_cronometragem_pos_commit(
+            inscricao_id,
+            permitir_reenvio=permitir_reenvio,
+        )
+    )
+
+
+@receiver(pre_save, sender=Participante)
+def preparar_reenvio_participante_cronometragem(sender, instance, **kwargs):
+    instance._deve_reenviar_cronometragem = False
+
+    if not instance.pk or not _campos_relevantes_no_update(
+        kwargs.get("update_fields"),
+        PARTICIPANTE_ENVIO_UPDATE_FIELDS,
+    ):
+        return
+
+    try:
+        anterior = sender.objects.only(*PARTICIPANTE_REENVIO_FIELDS).get(pk=instance.pk)
+    except sender.DoesNotExist:
+        return
+
+    instance._deve_reenviar_cronometragem = _campos_foram_alterados(
+        instance,
+        anterior,
+        PARTICIPANTE_REENVIO_FIELDS,
+    )
+
+
+@receiver(post_save, sender=Participante)
+def reenviar_inscricoes_participante_cronometragem(sender, instance, **kwargs):
+    if not getattr(instance, "_deve_reenviar_cronometragem", False):
+        return
+
+    _agendar_reenvio_inscricoes_cronometragem(
+        instance.inscricoes.filter(
+            pago=True,
+            enviada_cronometragem=True,
+        )
+    )
+
+
+@receiver(pre_save, sender=Corrida)
+def preparar_reenvio_corrida_cronometragem(sender, instance, **kwargs):
+    instance._deve_reenviar_cronometragem = False
+
+    if not instance.pk or not _campos_relevantes_no_update(
+        kwargs.get("update_fields"),
+        CORRIDA_REENVIO_FIELDS,
+    ):
+        return
+
+    try:
+        anterior = sender.objects.only(*CORRIDA_REENVIO_FIELDS).get(pk=instance.pk)
+    except sender.DoesNotExist:
+        return
+
+    instance._deve_reenviar_cronometragem = _campos_foram_alterados(
+        instance,
+        anterior,
+        CORRIDA_REENVIO_FIELDS,
+    )
+
+
+@receiver(post_save, sender=Corrida)
+def reenviar_inscricoes_corrida_cronometragem(sender, instance, **kwargs):
+    if not getattr(instance, "_deve_reenviar_cronometragem", False):
+        return
+
+    _agendar_reenvio_inscricoes_cronometragem(
+        instance.inscricoes.filter(
+            pago=True,
+            enviada_cronometragem=True,
+        )
+    )
+
+
+@receiver(pre_save, sender=PercursoCorrida)
+def preparar_reenvio_percurso_cronometragem(sender, instance, **kwargs):
+    instance._deve_reenviar_cronometragem = False
+
+    if not instance.pk or not _campos_relevantes_no_update(
+        kwargs.get("update_fields"),
+        PERCURSO_REENVIO_FIELDS,
+    ):
+        return
+
+    try:
+        anterior = sender.objects.only(*PERCURSO_REENVIO_FIELDS).get(pk=instance.pk)
+    except sender.DoesNotExist:
+        return
+
+    instance._deve_reenviar_cronometragem = _campos_foram_alterados(
+        instance,
+        anterior,
+        PERCURSO_REENVIO_FIELDS,
+    )
+
+
+@receiver(post_save, sender=PercursoCorrida)
+def reenviar_inscricoes_percurso_cronometragem(sender, instance, **kwargs):
+    if not getattr(instance, "_deve_reenviar_cronometragem", False):
+        return
+
+    _agendar_reenvio_inscricoes_cronometragem(
+        instance.inscricoes.filter(
+            pago=True,
+            enviada_cronometragem=True,
+        )
+    )
 
 
 REQUIRED_COLUMN_ALIASES = {

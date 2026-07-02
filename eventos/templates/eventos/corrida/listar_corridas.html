@@ -116,8 +116,23 @@
                 {{ corrida.local_evento }}
               </p>
               {% endif %}
+
+              {% if corrida.vagas_restantes is not None %}
+              <p class="text-sm font-black {% if corrida.esta_esgotada %}text-red-600{% else %}text-green-700{% endif %}">
+                {% if corrida.esta_esgotada %}
+                  Inscrições esgotadas
+                {% else %}
+                  Vagas restantes: {{ corrida.vagas_restantes }}
+                {% endif %}
+              </p>
+              {% endif %}
             </div>
 
+            {% if corrida.esta_esgotada %}
+              <div class="mt-6 flex w-full items-center justify-center rounded-2xl bg-slate-200 px-5 py-3 text-sm font-black text-slate-700">
+                Inscrições esgotadas
+              </div>
+            {% else %}
             <a
               href="{% url 'inscrever_corrida' corrida.id %}"
               class="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl bg-[#E50914] px-5 py-3 text-sm font-black text-white shadow-[0_16px_32px_rgba(229,9,20,0.24)] transition hover:-translate-y-0.5 hover:bg-red-700 hover:shadow-[0_20px_44px_rgba(229,9,20,0.30)]"
@@ -125,6 +140,7 @@
               Ver detalhes
               <span aria-hidden="true">→</span>
             </a>
+            {% endif %}
           </div>
         </article>
         {% endfor %}

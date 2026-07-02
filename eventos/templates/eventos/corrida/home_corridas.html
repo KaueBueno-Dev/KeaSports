@@ -113,14 +113,30 @@
               {{ corrida.local_evento }}
             </p>
             {% endif %}
+
+            {% if corrida.vagas_restantes is not None %}
+            <p class="mt-3 text-sm font-bold {% if corrida.esta_esgotada %}text-red-600{% else %}text-green-700{% endif %}">
+              {% if corrida.esta_esgotada %}
+                Inscrições esgotadas
+              {% else %}
+                Vagas restantes: {{ corrida.vagas_restantes }}
+              {% endif %}
+            </p>
+            {% endif %}
           </div>
 
-          <a
-            href="{% url 'inscrever_corrida' corrida.id %}"
-            class="block w-full text-center bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition font-semibold"
-          >
-            Inscrever-se
-          </a>
+          {% if corrida.esta_esgotada %}
+            <div class="block w-full text-center bg-gray-200 text-gray-700 py-2 rounded-lg font-semibold">
+              Inscrições esgotadas
+            </div>
+          {% else %}
+            <a
+              href="{% url 'inscrever_corrida' corrida.id %}"
+              class="block w-full text-center bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition font-semibold"
+            >
+              Inscrever-se
+            </a>
+          {% endif %}
         </div>
       </div>
       {% endfor %}

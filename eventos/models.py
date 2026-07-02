@@ -1,7 +1,12 @@
 ﻿from django.db import models
-from datetime import date
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
+from .services.categorias import (
+    MENSAGEM_IDADE_MINIMA_INSCRICAO,
+    calcular_categoria_por_idade,
+    calcular_idade,
+    idade_permitida_para_inscricao,
+)
 from .validators import validate_excel_extension, validate_file_size, validate_image_extension
 
 
@@ -19,7 +24,7 @@ class Participante(models.Model):
 
     data_nascimento = models.DateField()
     idade = models.IntegerField(blank=True, null=True)
-    categoria = models.CharField(max_length=8, blank=True, null=True)
+    categoria = models.CharField(max_length=20, blank=True, null=True)
 
     cpf = models.CharField(max_length=11, unique=True)
 
@@ -42,41 +47,13 @@ class Participante(models.Model):
     sexo = models.CharField(max_length=1, choices=SEXO_OPCOES, default='M', null=True, blank=True)
 
     def calcular_categoria(self):
-
-        if self.idade is None:
-            return ""
-
-        if self.idade <= 19:
-            return "15-19"
-        elif 20 <= self.idade <= 24:
-            return "20-24"
-        elif 25 <= self.idade <= 29:
-            return "25-29"
-        elif 30 <= self.idade <= 39:
-            return "30-39"
-        elif 40 <= self.idade <= 44:
-            return "40-44"
-        elif 45 <= self.idade <= 49:
-            return "45-49"
-        elif 50 <= self.idade <= 54:
-            return "50-54"
-        elif 55 <= self.idade <= 59:
-            return "55-59"
-        elif 60 <= self.idade <= 64:
-            return "60-64"
-        else:
-            return "65+"
+        return calcular_categoria_por_idade(self.idade)
 
     def save(self, *args, **kwargs):
 
         if self.data_nascimento:
-            hoje = date.today()
-
-            self.idade = hoje.year - self.data_nascimento.year - (
-                (hoje.month, hoje.day) <
-                (self.data_nascimento.month, self.data_nascimento.day)
-            )
-
+            referencia = getattr(self, "_categoria_referencia", None)
+            self.idade = calcular_idade(self.data_nascimento, referencia=referencia)
             self.categoria = self.calcular_categoria()
 
         super().save(*args, **kwargs)
@@ -95,6 +72,7 @@ class Corrida(models.Model):
         null=True,
         verbose_name="Local do evento",
     )
+    limite_inscritos = models.PositiveIntegerField(null=True, blank=True)
     data = models.DateField(db_index=True)
     imagem = models.ImageField(
         upload_to='corridas/',
@@ -109,6 +87,27 @@ class Corrida(models.Model):
 
     def __str__(self):
         return self.nome
+
+    @property
+    def vagas_ocupadas(self):
+        vagas_anotadas = getattr(self, "vagas_ocupadas_pagas", None)
+        if vagas_anotadas is not None:
+            return vagas_anotadas
+        if not self.pk:
+            return 0
+        return self.inscricoes.filter(pago=True).count()
+
+    @property
+    def vagas_restantes(self):
+        if self.limite_inscritos is None:
+            return None
+        return max(self.limite_inscritos - self.vagas_ocupadas, 0)
+
+    @property
+    def esta_esgotada(self):
+        if self.limite_inscritos is None:
+            return False
+        return self.vagas_ocupadas >= self.limite_inscritos
 
 
 class PercursoCorrida(models.Model):
@@ -150,14 +149,14 @@ class ArquivoExcel(models.Model):
 
     corrida = models.ForeignKey(
         Corrida,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="resultados",
         null=True,
         blank=True,
     )
     percurso = models.OneToOneField(
         PercursoCorrida,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="resultado",
         null=True,
         blank=True,
@@ -265,6 +264,9 @@ class Inscricao(models.Model):
     )
     pago = models.BooleanField(default=False, db_index=True)
     numero_chip = models.CharField(max_length=30, null=True, blank=True, db_index=True)
+    enviada_cronometragem = models.BooleanField(default=False, db_index=True)
+    data_envio_cronometragem = models.DateTimeField(null=True, blank=True)
+    erro_envio_cronometragem = models.TextField(null=True, blank=True)
     criada_em = models.DateTimeField(auto_now_add=True, db_index=True)
     atualizada_em = models.DateTimeField(auto_now=True)
 
@@ -292,6 +294,22 @@ class Inscricao(models.Model):
             raise ValidationError({
                 "percurso": "Percurso invalido para esta corrida.",
             })
+        if (
+            self.participante_id
+            and self.corrida_id
+            and self.participante.data_nascimento
+            and not idade_permitida_para_inscricao(
+                self.participante.data_nascimento,
+                referencia=self.corrida.data,
+            )
+        ):
+            raise ValidationError({
+                "participante": MENSAGEM_IDADE_MINIMA_INSCRICAO,
+            })
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class ResultadoInscricao(models.Model):
@@ -326,4 +344,3 @@ class Resultados(models.Model):
 
     def __str__(self):
         return self.nome
-

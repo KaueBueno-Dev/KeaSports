@@ -16,6 +16,8 @@ gunicorn==23.0.0
 whitenoise[brotli]==6.11.0
 python-dateutil==2.9.0.post0
 pytz==2025.2
+python-dotenv==1.2.2
+requests==2.34.2
 six==1.17.0
 sqlparse==0.5.3
 tabula-py==2.10.0

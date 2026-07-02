@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
 
 try:
     import dj_database_url
@@ -11,6 +12,7 @@ except ImportError:
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env", override=False)
 
 
 def env_bool(name, default=False):
@@ -292,6 +294,9 @@ if MEDIA_STORAGE == "s3":
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CRONOMETRAGEM_API_KEY = os.getenv("CRONOMETRAGEM_API_KEY", "").strip()
+CRONOMETRAGEM_RECEIVER_URL = os.getenv("CRONOMETRAGEM_RECEIVER_URL", "").strip()
+CRONOMETRAGEM_RECEIVER_API_KEY = os.getenv("CRONOMETRAGEM_RECEIVER_API_KEY", "").strip()
+CRONOMETRAGEM_RECEIVER_TIMEOUT = env_int("CRONOMETRAGEM_RECEIVER_TIMEOUT", 3)
 
 
 REST_FRAMEWORK = {
